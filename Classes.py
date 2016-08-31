@@ -4,14 +4,16 @@
 # In[ ]:
 
 import numpy as np
-import scipy as sp
-from scipy import linalg
+import matplotlib.pyplot as plt
+import scipy as sc
+from scipy import integrate
 import sympy as sy
+from scipy import linalg
 import pylab as pl
 import math as ma
 import time 
-
 # FONCTIONS ----------------------------------------
+# Fonctions de base
 
 def poly(vec,a,b):
     i=vec[0]
@@ -56,12 +58,20 @@ def expandnp(arr):
 
 #---------------------------
 # renvoie le tableau de valeurs de obj (fonction de 2 variables) pour tous les couples de valeurs dans t
-def cov(obj,t):
+def cov(fonc,t):
     # Calculer la matrice de variance-covariance d'une série de temps à partir d'une fonction de covariance
-    vec=expandnp(np.array([t,t])).T
-    res=np.apply_along_axis(obj.val,axis=0,arr=vec)
-    res=np.reshape(res,(len(t),len(t)))
-    return res;
+    vec=expandnp([t,t])
+    res=np.apply_along_axis(fonc,0,*(vec.T))
+    return res.reshape(len(t),len(t));
+
+#-------------------------
+# Fonctions qui renvoie une expression Sympy à partir de symboles et de paramètres 
+# Principaux Noyaux 
+def sy_Periodic(symb,el,per,sig):
+    return (sig**2)*sy.exp( -((symb[0]-symb[1])**2/(2*el**2))-sy.sin(  2*ma.pi*(symb[0]-symb[1]) /per)**2/2 );
+
+def sy_RBF(symb,el,sig):
+    return (sig**2)*sy.exp( - (symb[0]-symb[1])**2/(2*el**2));
 
 
 # CLASSES --------------------------------------------------------------------------------------------------
@@ -75,7 +85,7 @@ class X_fonc:
             self.v1=v1
             self.v2=v2
         else:
-            print "Erreur dans les dimensions de paramètres"            
+            print("Erreur dans les dimensions de paramètres")
     def val(self):
         t=self.t
         u=self.u
@@ -96,9 +106,9 @@ class X_fonc:
     
 class beta:
     " Fonctions paramètre de référence proposées dans Gellar et al. , 2014 "
-    import math as ma
-    def __init__(self,num=1,J=1):
+    def __init__(self,num=1,J=1.):
         self.num=num
+        self.J=J
     def val(self,vecarg):
         # vecarg doit être un np.array simple (1D) dont chaque élément est une variable de la fonction
         t=vecarg[0]
@@ -108,12 +118,21 @@ class beta:
         if num==1:
             return(10*t/T-5);
         if num==2:
-            return((1-2*T/J)*(5-40*(t/T-0.5)^2));
+            return((1-2*T/J)*(5-40*(t/T-0.5)**2));
         if num==3:
             return(5-10*(T-t)/J);
         if num==4:
-            return(sin(2*ma.pi*T/J)*(5-10*(T-t)/J));
+            return(np.sin(2*ma.pi*T/J)*(5-10*(T-t)/J));
         
+def beta_fonc(t,T,num,J=1):
+    if num==1:
+        return(10*t/T-5);
+    if num==2:
+        return((1-2*T/J)*(5-40*(t/T-0.5)**2));
+    if num==3:
+        return(5-10*(T-t)/J);
+    if num==4:
+        return(np.sin(2*ma.pi*T/J)*(5-10*(T-t)/J));
 
 #------------------
         
@@ -165,7 +184,6 @@ class Prod:
 class Base:
     "Base polynomiale canonique des fonctions de R^2 dans R," 
     "premier element du vecteur entrée est la dimension de la base polynomiale sur le premier axe et de même pour le deuxième élément"
-    import numpy as np
     def __init__(self,darg=np.zeros(2)):
         self.dim=2
         self.dt =darg[0]
@@ -180,7 +198,57 @@ class Base:
         return Phi;
     
 #------------------
+#------------------
+class Integ_fo:
+    "Integrale d'une classe sur un intervalle multidimensionnel parréllépipédique. Renvoie un np.array dont la longueur correspond la taille de la valeur de sortie de la classe."
+    def __init__(self,fonc,borne_inf,borne_sup,J):
+        dim_int=np.array([])
+        for i in range(len(borne_inf)):
+            if borne_sup[i]!=borne_inf[i]:
+                dim_int=np.append(dim_int,i)
+        self.obj=fonc
+        self.borne_inf=borne_inf.astype(float)
+        self.borne_sup=borne_sup.astype(float)
+        dim_int=dim_int.astype(int)
+        self.dim_int=dim_int
+        self.J=J
+    
+    def val(self,vec=None,dim=None):
+        # vec est le np.array contenant les variables de la fonction à évaluer, 
+        # Pour toute variable sur laquelle la fonction n'est pas intégrée il s'agit 
+        # de la valeur constante qu'elle doit prendre
+        # Pour la variable intégrée il s'agit de la borne inférieure d'intégration 
+        # /!\ Une dimension à la fois pour l'intégration /!\
+        J=self.J
+        # Si c'est le premier appel de la fonction, on calcule la masse volumique
+        if vec is None:
+            dim=self.dim_int[0]
+            vec=self.borne_inf
+            Prod=1./(J**len(self.dim_int))
+            for i in self.dim_int:
+                Prod=Prod*(self.borne_sup[i]-self.borne_inf[i])
+            
+        Un=np.ones(J+1,float)
+        Un[0]=0.5
+        Un[J]=0.5
+        
+        x=np.repeat(np.array([vec]),[J+1],axis=0)
+        x[:,dim]= vec[dim]+np.arange(J+1)*1.*(self.borne_sup[dim]-vec[dim])/J 
+        # Si on est au niveau d'une feuille, on évalue et somme le volume de chaque feuille
+        if dim==self.dim_int[-1]:
+            liste=list(x.T)
+            F=np.apply_along_axis( self.obj , 0, *liste )
+        else:
+            next_dim= self.dim_int[np.argwhere(dim==self.dim_int)[0][0]+1]
+            F=np.apply_along_axis( self.val , axis=1, arr=x, dim=next_dim )
 
+        # si c'est le premier appel, on multiplie le volume total par la masse volumique "Prod", sinon on renvoie simplement le volume de la branche
+        if dim==self.dim_int[0]:
+            vol=Un.dot(F)
+            return Prod*vol;
+        else:
+            return Un.dot(F);
+#------------------
 class Integ:
     "Integrale d'une classe sur un intervalle multidimensionnel parréllépipédique. Renvoie un np.array dont la longueur correspond la taille de la valeur de sortie de la classe."
     def __init__(self,obj,borne_inf,borne_sup,J):
@@ -188,7 +256,6 @@ class Integ:
         for i in range(len(borne_inf)):
             if borne_sup[i]!=borne_inf[i]:
                 dim_int=np.append(dim_int,i)
-        self.dim=obj.dim
         self.obj=obj
         self.borne_inf=borne_inf.astype(float)
         self.borne_sup=borne_sup.astype(float)
